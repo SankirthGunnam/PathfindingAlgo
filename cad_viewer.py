@@ -3,6 +3,7 @@ import heapq
 import ctypes
 import os
 import time
+import json
 from collections import defaultdict
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
@@ -685,14 +686,19 @@ class ConnectionItem(QGraphicsPathItem):
 
 class CADScene(QGraphicsScene):
 
+    SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "schematic.json")
+
     def __init__(self):
         super().__init__()
-        self.setSceneRect(-300, -200, 2800, 1400)
+        data = self._load_schema()
+        r = data["scene"]["rect"]
+        self.setSceneRect(r[0], r[1], r[2], r[3])
         self.components:  list = []
         self.connections: list[ConnectionItem] = []
         self._needs_reroute = False
         self._dirty_components: set = set()
-        self._populate()
+        self._populate(data)
         self.route_all()
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -711,114 +717,47 @@ class CADScene(QGraphicsScene):
         pin2.connections.append(conn)
         self.connections.append(conn)
 
-    # ── S23-style RF Frontend schematic ──────────────────────────────────────
+    # ── JSON schema loader ────────────────────────────────────────────────────
 
-    def _populate(self):
-        # ── Components ──────────────────────────────────────────────────────
+    def _load_schema(self) -> dict:
+        with open(self.SCHEMA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-        # RFIC — center
-        rfic = self._add_comp(RFICItem(1))
-        rfic.setPos(620, 160)
+    # ── Populate from JSON ────────────────────────────────────────────────────
 
-        # LNA — top-left
-        lna = self._add_comp(RFComponentItem(
-            2, "LNA", QColor(70, 160, 210), w=130, h=110,
-            pin_spec=[
-                ('left',  'RF_IN'), ('left',  'VCC'), ('left',  'GND'),
-                ('right', 'RF_OUT'), ('right', 'EN'), ('right', 'BYPASS'),
-            ]
-        ))
-        lna.setPos(160, 40)
+    def _populate(self, data: dict):
+        comp_map: dict[int, object] = {}
 
-        # PAM — top-right
-        pam = self._add_comp(RFComponentItem(
-            3, "PAM", QColor(70, 160, 210), w=140, h=130,
-            pin_spec=[
-                ('left',  'RF_IN_HB'), ('left',  'RF_IN_MB'),
-                ('left',  'VCC_PA'),   ('left',  'GND'),
-                ('right', 'RF_OUT_HB'), ('right', 'RF_OUT_MB'),
-                ('right', 'PA_EN'),    ('right', 'VCTL'),
-            ]
-        ))
-        pam.setPos(1000, 40)
+        for c in data["components"]:
+            cid  = c["id"]
+            kind = c["type"]
 
-        # LPAMID — bottom-right
-        lpamid = self._add_comp(RFComponentItem(
-            4, "LPAMID", QColor(70, 160, 210), w=130, h=100,
-            pin_spec=[
-                ('left',  'RF_IN'), ('left',  'VCC'), ('left',  'GND'),
-                ('right', 'RF_OUT'), ('right', 'EN'), ('right', 'VCTL'),
-            ]
-        ))
-        lpamid.setPos(1000, 400)
+            if kind == "rfic":
+                item = RFICItem(cid)
+            elif kind == "antenna":
+                item = AntennaItem(cid)
+            else:
+                item = RFComponentItem(
+                    cid,
+                    c["label"],
+                    QColor(*c["color"]),
+                    w=c["w"], h=c["h"],
+                    pin_spec=[tuple(p) for p in c["pins"]],
+                )
 
-        # Coupler — far right top
-        coupler = self._add_comp(RFComponentItem(
-            5, "Coupler", QColor(70, 160, 210), w=110, h=90,
-            pin_spec=[
-                ('left',  'IN'),      ('left',  'COUPLED'),
-                ('right', 'THRU'),    ('right', 'ISO'),
-            ]
-        ))
-        coupler.setPos(1260, 40)
+            item.setPos(c["x"], c["y"])
+            self._add_comp(item)
+            comp_map[cid] = item
 
-        # FEM — bottom-left
-        fem = self._add_comp(RFComponentItem(
-            6, "FEM", QColor(70, 160, 210), w=140, h=130,
-            pin_spec=[
-                ('left',  'ANT_PORT'), ('left',  'TX_IN'),
-                ('left',  'VCC'),      ('left',  'GND'),
-                ('right', 'RX_OUT'),   ('right', 'TX_OUT'),
-                ('right', 'RX_IN'),    ('right', 'CTRL'),
-            ]
-        ))
-        fem.setPos(160, 420)
-
-        # Switch — far right center
-        switch = self._add_comp(RFComponentItem(
-            7, "Switch", QColor(70, 160, 210), w=120, h=130,
-            pin_spec=[
-                ('left',  'ANT'),
-                ('right', 'TX1'), ('right', 'TX2'),
-                ('right', 'RX1'), ('right', 'RX2'),
-            ]
-        ))
-        switch.setPos(1260, 280)
-
-        # Antenna — far right
-        ant = self._add_comp(AntennaItem(8))
-        ant.setPos(1500, 220)
-
-        # ── Connections ─────────────────────────────────────────────────────
-
-        # TX high-band: RFIC → PAM → Coupler → Switch(TX1)
-        self._connect(rfic.get_pin('TX_HB'),      pam.get_pin('RF_IN_HB'),  'TX_HB')
-        self._connect(pam.get_pin('RF_OUT_HB'),   coupler.get_pin('IN'),    'PA_OUT_HB')
-        self._connect(coupler.get_pin('THRU'),    switch.get_pin('TX1'),    'TX1_THRU')
-        self._connect(coupler.get_pin('COUPLED'), rfic.get_pin('CPL_IN'),   'CPL_FB')
-
-        # TX mid-band: RFIC → PAM → Switch(TX2)
-        self._connect(rfic.get_pin('TX_MB'),      pam.get_pin('RF_IN_MB'),  'TX_MB')
-        self._connect(pam.get_pin('RF_OUT_MB'),   switch.get_pin('TX2'),    'PA_OUT_MB')
-
-        # TX low-band: RFIC → LPAMID → FEM
-        self._connect(rfic.get_pin('TX_LB'),      lpamid.get_pin('RF_IN'), 'TX_LB')
-        self._connect(lpamid.get_pin('RF_OUT'),   fem.get_pin('TX_IN'),    'TX_LB_PA')
-
-        # RX high-band: Switch(RX1) → LNA → RFIC
-        self._connect(switch.get_pin('RX1'),      lna.get_pin('RF_IN'),    'RX_HB')
-        self._connect(lna.get_pin('RF_OUT'),      rfic.get_pin('RX1_HB'),  'LNA_OUT_HB')
-
-        # RX low-band: Switch(RX2) → FEM → RFIC
-        self._connect(switch.get_pin('RX2'),      fem.get_pin('ANT_PORT'), 'RX_LB_ANT')
-        self._connect(fem.get_pin('RX_OUT'),      rfic.get_pin('RX_LB'),   'FEM_RX_OUT')
-
-        # Antenna to switch
-        self._connect(ant.get_pin('FEED'),        switch.get_pin('ANT'),   'ANT_PORT')
-
-        # Control lines
-        self._connect(rfic.get_pin('LNA_EN'),     lna.get_pin('EN'),       'LNA_EN')
-        self._connect(rfic.get_pin('PA_EN'),      pam.get_pin('PA_EN'),    'PA_EN')
+        for conn in data["connections"]:
+            from_id, from_pin = conn["from"]
+            to_id,   to_pin   = conn["to"]
+            label = conn.get("label", "")
+            self._connect(
+                comp_map[from_id].get_pin(from_pin),
+                comp_map[to_id].get_pin(to_pin),
+                label,
+            )
 
     # ── A* routing ────────────────────────────────────────────────────────────
 

@@ -1,0 +1,232 @@
+{
+  "scene": { "rect": [-300, -200, 2800, 1400] },
+
+  "components": [
+    {
+      "id": 1,
+      "type": "rfic",
+      "x": 620, "y": 160,
+      "comment": "5G RFIC — center of schematic"
+    },
+    {
+      "id": 2,
+      "type": "rf_component",
+      "label": "LNA",
+      "color": [70, 160, 210],
+      "w": 130, "h": 110,
+      "x": 160, "y": 40,
+      "pins": [
+        ["left",  "RF_IN"],
+        ["left",  "VCC"],
+        ["left",  "GND"],
+        ["right", "RF_OUT"],
+        ["right", "EN"],
+        ["right", "BYPASS"]
+      ]
+    },
+    {
+      "id": 3,
+      "type": "rf_component",
+      "label": "PAM",
+      "color": [70, 160, 210],
+      "w": 140, "h": 130,
+      "x": 1000, "y": 40,
+      "pins": [
+        ["left",  "RF_IN_HB"],
+        ["left",  "RF_IN_MB"],
+        ["left",  "VCC_PA"],
+        ["left",  "GND"],
+        ["right", "RF_OUT_HB"],
+        ["right", "RF_OUT_MB"],
+        ["right", "PA_EN"],
+        ["right", "VCTL"]
+      ]
+    },
+    {
+      "id": 4,
+      "type": "rf_component",
+      "label": "LPAMID",
+      "color": [70, 160, 210],
+      "w": 130, "h": 100,
+      "x": 1000, "y": 400,
+      "pins": [
+        ["left",  "RF_IN"],
+        ["left",  "VCC"],
+        ["left",  "GND"],
+        ["right", "RF_OUT"],
+        ["right", "EN"],
+        ["right", "VCTL"]
+      ]
+    },
+    {
+      "id": 5,
+      "type": "rf_component",
+      "label": "Coupler",
+      "color": [70, 160, 210],
+      "w": 110, "h": 90,
+      "x": 1260, "y": 40,
+      "pins": [
+        ["left",  "IN"],
+        ["left",  "COUPLED"],
+        ["right", "THRU"],
+        ["right", "ISO"]
+      ]
+    },
+    {
+      "id": 6,
+      "type": "rf_component",
+      "label": "FEM",
+      "color": [70, 160, 210],
+      "w": 140, "h": 130,
+      "x": 160, "y": 420,
+      "pins": [
+        ["left",  "ANT_PORT"],
+        ["left",  "TX_IN"],
+        ["left",  "VCC"],
+        ["left",  "GND"],
+        ["right", "RX_OUT"],
+        ["right", "TX_OUT"],
+        ["right", "RX_IN"],
+        ["right", "CTRL"]
+      ]
+    },
+    {
+      "id": 7,
+      "type": "rf_component",
+      "label": "Switch",
+      "color": [70, 160, 210],
+      "w": 120, "h": 130,
+      "x": 1500, "y": 260,
+      "pins": [
+        ["left",  "ANT"],
+        ["right", "TX1"],
+        ["right", "TX2"],
+        ["right", "RX1"],
+        ["right", "RX2"]
+      ]
+    },
+    {
+      "id": 8,
+      "type": "antenna",
+      "x": 1740, "y": 295,
+      "comment": "Main antenna"
+    },
+    {
+      "id": 9,
+      "type": "rf_component",
+      "label": "SAW-HB",
+      "color": [160, 100, 200],
+      "w": 100, "h": 70,
+      "x": 440, "y": 40,
+      "pins": [
+        ["left",  "RF_IN"],
+        ["left",  "GND"],
+        ["right", "RF_OUT"]
+      ],
+      "comment": "SAW filter on high-band RX path (LNA → RFIC)"
+    },
+    {
+      "id": 10,
+      "type": "rf_component",
+      "label": "BPF-HB",
+      "color": [160, 100, 200],
+      "w": 100, "h": 70,
+      "x": 1380, "y": 40,
+      "pins": [
+        ["left",  "IN"],
+        ["right", "OUT"]
+      ],
+      "comment": "Band-pass filter on high-band TX path (Coupler → Switch)"
+    },
+    {
+      "id": 11,
+      "type": "rf_component",
+      "label": "Balun",
+      "color": [200, 130, 50],
+      "w": 110, "h": 80,
+      "x": 820, "y": 410,
+      "pins": [
+        ["left",  "IN"],
+        ["right", "OUT_P"],
+        ["right", "OUT_N"]
+      ],
+      "comment": "Balun on low-band TX path (RFIC TX_LB → LPAMID)"
+    },
+    {
+      "id": 12,
+      "type": "rf_component",
+      "label": "PowerDet",
+      "color": [180, 70, 70],
+      "w": 110, "h": 80,
+      "x": 1150, "y": 40,
+      "pins": [
+        ["left",  "RF_IN"],
+        ["right", "THRU"],
+        ["right", "VOUT"],
+        ["right", "GND"]
+      ],
+      "comment": "Directional power detector — samples PA output for APC feedback"
+    },
+    {
+      "id": 13,
+      "type": "rf_component",
+      "label": "VCO",
+      "color": [50, 160, 100],
+      "w": 130, "h": 100,
+      "x": 620, "y": 560,
+      "pins": [
+        ["left",  "VTUNE"],
+        ["left",  "VCC"],
+        ["left",  "GND"],
+        ["right", "RF_OUT"],
+        ["right", "RF_OUTB"]
+      ],
+      "comment": "Voltage-controlled oscillator for LO generation"
+    },
+    {
+      "id": 14,
+      "type": "rf_component",
+      "label": "PLL",
+      "color": [50, 160, 100],
+      "w": 140, "h": 120,
+      "x": 350, "y": 560,
+      "pins": [
+        ["left",  "REF_IN"],
+        ["left",  "VCC"],
+        ["left",  "GND"],
+        ["left",  "LOCK_DET"],
+        ["right", "VTUNE"],
+        ["right", "CLK"],
+        ["right", "DATA"],
+        ["right", "LE"]
+      ],
+      "comment": "Phase-locked loop — drives VCO, SPI-controlled via RFIC"
+    }
+  ],
+
+  "connections": [
+    { "from": [1, "TX_HB"],      "to": [3, "RF_IN_HB"],   "label": "TX_HB"      },
+    { "from": [3, "RF_OUT_HB"],  "to": [12, "RF_IN"],      "label": "PA_OUT_HB"  },
+    { "from": [12, "THRU"],      "to": [5, "IN"],           "label": "DET_THRU"   },
+    { "from": [5, "COUPLED"],    "to": [1, "CPL_IN"],       "label": "CPL_FB"     },
+    { "from": [12, "VOUT"],      "to": [1, "GPIO"],         "label": "PA_DET"     },
+    { "from": [5, "THRU"],       "to": [10, "IN"],          "label": "TX1_THRU"   },
+    { "from": [10, "OUT"],       "to": [7, "TX1"],          "label": "BPF_HB_OUT" },
+    { "from": [1, "TX_MB"],      "to": [3, "RF_IN_MB"],    "label": "TX_MB"      },
+    { "from": [3, "RF_OUT_MB"],  "to": [7, "TX2"],          "label": "PA_OUT_MB"  },
+    { "from": [1, "TX_LB"],      "to": [11, "IN"],          "label": "TX_LB"      },
+    { "from": [11, "OUT_P"],     "to": [4, "RF_IN"],        "label": "BAL_OUT"    },
+    { "from": [4, "RF_OUT"],     "to": [6, "TX_IN"],        "label": "TX_LB_PA"   },
+    { "from": [7, "RX1"],        "to": [2, "RF_IN"],        "label": "RX_HB"      },
+    { "from": [2, "RF_OUT"],     "to": [9, "RF_IN"],        "label": "LNA_OUT"    },
+    { "from": [9, "RF_OUT"],     "to": [1, "RX1_HB"],       "label": "SAW_HB_OUT" },
+    { "from": [7, "RX2"],        "to": [6, "ANT_PORT"],     "label": "RX_LB_ANT"  },
+    { "from": [6, "RX_OUT"],     "to": [1, "RX_LB"],        "label": "FEM_RX_OUT" },
+    { "from": [8, "FEED"],       "to": [7, "ANT"],          "label": "ANT_PORT"   },
+    { "from": [1, "LNA_EN"],     "to": [2, "EN"],           "label": "LNA_EN"     },
+    { "from": [1, "PA_EN"],      "to": [3, "PA_EN"],        "label": "PA_EN"      },
+    { "from": [14, "VTUNE"],     "to": [13, "VTUNE"],       "label": "PLL_TUNE"   },
+    { "from": [14, "CLK"],       "to": [1, "RFFE_CLK"],     "label": "PLL_CLK"    },
+    { "from": [14, "DATA"],      "to": [1, "RFFE_DATA"],    "label": "PLL_DATA"   }
+  ]
+}

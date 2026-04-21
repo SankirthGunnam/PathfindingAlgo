@@ -1,6 +1,9 @@
 import sys
 import random
 import heapq
+import ctypes
+import os
+import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsRectItem, QGraphicsPathItem,
@@ -120,13 +123,93 @@ class RouterGrid:
 
 _DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))   # N S W E
 
+# ── C++ A* DLL ────────────────────────────────────────────────────────────────
 
-def astar_route(grid: RouterGrid,
-                start: QPointF, end: QPointF) -> list[QPointF] | None:
-    """
-    Obstacle-avoiding orthogonal A* with congestion penalty.
-    Returns simplified world-space waypoints, or None if unreachable.
-    """
+_astar_dll = None
+
+_route_all_dll = None
+
+def _load_astar_dll():
+    global _astar_dll, _route_all_dll
+    dll_dir  = os.path.dirname(os.path.abspath(__file__))
+    dll_path = os.path.join(dll_dir, "astar.dll")
+    if not os.path.exists(dll_path):
+        return False
+    try:
+        os.add_dll_directory(dll_dir)
+        lib = ctypes.CDLL(dll_path)
+
+        fn = lib.astar_route
+        fn.restype  = ctypes.c_int
+        fn.argtypes = [
+            ctypes.c_int, ctypes.c_int,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+            ctypes.c_double, ctypes.c_double,
+            ctypes.c_double, ctypes.c_double,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int,
+        ]
+        _astar_dll = fn
+
+        fa = lib.route_all_cpp
+        fa.restype  = ctypes.c_int
+        fa.argtypes = [
+            ctypes.c_int, ctypes.c_int,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double), ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int,
+        ]
+        _route_all_dll = fa
+        return True
+    except Exception:
+        return False
+
+_dll_available = _load_astar_dll()
+
+
+def _astar_route_cpp(grid: RouterGrid, start: QPointF, end: QPointF):
+    blocked_list = []
+    for (r, c) in grid._blocked:
+        blocked_list.extend([r, c])
+    blocked_arr = (ctypes.c_int * len(blocked_list))(*blocked_list)
+
+    congestion_list = []
+    for (r, c), count in grid._congestion.items():
+        congestion_list.extend([r, c, count])
+    congestion_arr = (ctypes.c_int * len(congestion_list))(*congestion_list)
+
+    max_out = grid.rows * grid.cols
+    out_x = (ctypes.c_double * max_out)()
+    out_y = (ctypes.c_double * max_out)()
+
+    n = _astar_dll(
+        grid.cols, grid.rows,
+        grid.ox, grid.oy, float(CELL_SIZE),
+        blocked_arr, len(grid._blocked),
+        congestion_arr, len(grid._congestion),
+        start.x(), start.y(),
+        end.x(), end.y(),
+        TURN_PENALTY, CONGESTION_PENALTY,
+        out_x, out_y, max_out,
+    )
+    if n < 0:
+        return None
+    return [QPointF(out_x[i], out_y[i]) for i in range(n)]
+
+
+def _astar_route_py(grid: RouterGrid,
+                    start: QPointF, end: QPointF) -> list[QPointF] | None:
     sr, sc = grid.world_to_cell(start.x(), start.y())
     er, ec = grid.world_to_cell(end.x(), end.y())
 
@@ -171,6 +254,13 @@ def astar_route(grid: RouterGrid,
                 heapq.heappush(heap, (ng + h(nr, nc), ng, nr, nc, di))
 
     return None
+
+
+def astar_route(grid: RouterGrid,
+                start: QPointF, end: QPointF) -> list[QPointF] | None:
+    if _dll_available:
+        return _astar_route_cpp(grid, start, end)
+    return _astar_route_py(grid, start, end)
 
 
 def simplify_path(pts: list[QPointF]) -> list[QPointF]:
@@ -580,30 +670,27 @@ class CADScene(QGraphicsScene):
 
     # ── A* routing ────────────────────────────────────────────────────────────
 
-    def route_all(self, partial: bool = False) -> tuple[int, int]:
+    def route_all(self, partial: bool = False):
         dirty = self._dirty_components if partial else set()
-        self._needs_reroute = False
+        self._needs_reroute  = False
         self._dirty_components = set()
 
         grid = RouterGrid(self.components)
 
         def net_length(conn):
             p1, p2 = conn.pin1.scene_pos(), conn.pin2.scene_pos()
-            return abs(p1.x() - p2.x()) + abs(p1.y() - p2.y())
+            return abs(p1.x()-p2.x()) + abs(p1.y()-p2.y())
 
         affected = set()
         if partial and dirty:
-            # 1. Connections directly attached to a moved component
             for comp in dirty:
                 for pin in comp.pins:
                     for conn in pin.connections:
                         affected.add(conn)
-
-            # 2. Connections whose path segments cross the moved component's bbox
             pad = (COMP_PAD_CELLS + 1) * CELL_SIZE
             dirty_rects = [
-                QRectF(c.pos().x() - pad, c.pos().y() - pad,
-                       c.w + 2 * pad, c.h + 2 * pad)
+                QRectF(c.pos().x()-pad, c.pos().y()-pad,
+                       c.w+2*pad, c.h+2*pad)
                 for c in dirty
             ]
             for conn in self.connections:
@@ -612,37 +699,96 @@ class CADScene(QGraphicsScene):
                 all_pts = ([conn.pin1.scene_pos()] +
                            list(conn._waypoints) +
                            [conn.pin2.scene_pos()])
-                for i in range(len(all_pts) - 1):
+                for i in range(len(all_pts)-1):
                     if any(_seg_crosses_rect(all_pts[i], all_pts[i+1], r)
                            for r in dirty_rects):
                         affected.add(conn)
                         break
 
-        # Replay stable cached paths onto the grid for congestion accuracy
-        stable = [c for c in self.connections if c not in affected]
-        for conn in stable:
-            if conn._waypoints:
-                _mark_path(grid, conn.pin1.scene_pos(), conn._waypoints,
-                           conn.pin2.scene_pos())
-
+        stable   = [c for c in self.connections if c not in affected]
         to_route = sorted(
             affected if (partial and dirty) else self.connections,
             key=net_length
         )
-        routed = fallback = 0
+
+        t0 = time.perf_counter()
+
+        if _route_all_dll and to_route:
+            routed, fallback = self._route_all_cpp(grid, to_route, stable)
+        else:
+            for conn in stable:
+                if conn._waypoints:
+                    _mark_path(grid, conn.pin1.scene_pos(),
+                               conn._waypoints, conn.pin2.scene_pos())
+            routed = fallback = 0
+            for conn in to_route:
+                path = astar_route(grid, pin_exit_point(conn.pin1),
+                                   pin_exit_point(conn.pin2))
+                if path:
+                    s = simplify_path(path)
+                    conn.set_routed_path(s)
+                    _mark_path(grid, conn.pin1.scene_pos(), s,
+                               conn.pin2.scene_pos())
+                    routed += 1
+                else:
+                    conn.update_path(); fallback += 1
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return routed, fallback, elapsed_ms
+
+    def _route_all_cpp(self, grid, to_route, stable):
+        bl = []
+        for (r, c) in grid._blocked:
+            bl.extend([r, c])
+        blocked_arr = (ctypes.c_int * len(bl))(*bl)
+
+        ep = []
         for conn in to_route:
-            path = astar_route(grid, pin_exit_point(conn.pin1),
-                               pin_exit_point(conn.pin2))
-            if path:
-                simplified = simplify_path(path)
-                conn.set_routed_path(simplified)
-                _mark_path(grid, conn.pin1.scene_pos(), simplified,
-                           conn.pin2.scene_pos())
+            p1 = pin_exit_point(conn.pin1)
+            p2 = pin_exit_point(conn.pin2)
+            ep.extend([p1.x(), p1.y(), p2.x(), p2.y()])
+        ep_arr = (ctypes.c_double * len(ep))(*ep)
+
+        sp, sc_list = [], []
+        for conn in stable:
+            if conn._waypoints:
+                pts = ([conn.pin1.scene_pos()] +
+                       list(conn._waypoints) +
+                       [conn.pin2.scene_pos()])
+                for pt in pts:
+                    sp.extend([pt.x(), pt.y()])
+                sc_list.append(len(pts))
+        sp_arr = (ctypes.c_double * len(sp))(*sp)
+        sc_arr = (ctypes.c_int * len(sc_list))(*sc_list)
+
+        n = len(to_route)
+        max_total = max(grid.rows * grid.cols, n * (grid.rows + grid.cols))
+        out_counts = (ctypes.c_int    * n)()
+        out_x      = (ctypes.c_double * max_total)()
+        out_y      = (ctypes.c_double * max_total)()
+
+        _route_all_dll(
+            grid.cols, grid.rows,
+            grid.ox, grid.oy, float(CELL_SIZE),
+            blocked_arr, len(grid._blocked),
+            ep_arr, n,
+            sp_arr, sc_arr, len(sc_list),
+            TURN_PENALTY, CONGESTION_PENALTY,
+            out_counts, out_x, out_y, max_total,
+        )
+
+        routed = fallback = offset = 0
+        for i, conn in enumerate(to_route):
+            pts = out_counts[i]
+            if pts > 0:
+                path = [QPointF(out_x[offset+j], out_y[offset+j])
+                        for j in range(pts)]
+                conn.set_routed_path(path)
+                offset += pts
                 routed += 1
             else:
                 conn.update_path()
                 fallback += 1
-
         return routed, fallback
 
     # ── background ────────────────────────────────────────────────────────────
@@ -729,7 +875,10 @@ class CADView(QGraphicsView):
             if event.button() == Qt.MouseButton.LeftButton:
                 s = self.scene()
                 if getattr(s, '_needs_reroute', False):
-                    s.route_all(partial=True)
+                    routed, fallback, ms = s.route_all(partial=True)
+                    win = self.window()
+                    if hasattr(win, '_refresh_status'):
+                        win._refresh_status(routed, fallback, ms)
 
 
 # ── Main Window ───────────────────────────────────────────────────────────────
@@ -764,12 +913,15 @@ class MainWindow(QMainWindow):
             "  Scroll=Zoom  |  Middle-drag=Pan  |  Click=Select  "
             "|  Drag=Move (snaps grid, auto-reroutes on release)"))
 
-    def _refresh_status(self, routed=None, fallback=None):
+    def _refresh_status(self, routed=None, fallback=None, elapsed_ms=None):
         n_comp = len(self.cad_scene.components)
         n_conn = len(self.cad_scene.connections)
         n_pins = sum(len(c.pins) for c in self.cad_scene.components)
-        extra  = (f"   |   A* routed: {routed}   Bezier fallback: {fallback}"
-                  if routed is not None else "")
+        backend = "C++ DLL" if _dll_available else "Python"
+        extra = ""
+        if routed is not None:
+            extra = (f"   |   Routed: {routed}   Fallback: {fallback}"
+                     f"   |   {backend}  {elapsed_ms:.1f} ms")
         self._status.showMessage(
             f"Components: {n_comp}   Pins: {n_pins}   Connections: {n_conn}{extra}")
 
@@ -781,8 +933,8 @@ class MainWindow(QMainWindow):
         self.cad_view.setTransform(QTransform())
 
     def reroute(self):
-        routed, fallback = self.cad_scene.route_all()
-        self._refresh_status(routed, fallback)
+        routed, fallback, ms = self.cad_scene.route_all()
+        self._refresh_status(routed, fallback, ms)
 
     def reload(self):
         self.cad_scene = CADScene()

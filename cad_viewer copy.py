@@ -199,6 +199,42 @@ def pin_exit_point(pin: "PinItem") -> QPointF:
     }.get(pin.side, p)
 
 
+def _seg_crosses_rect(a: QPointF, b: QPointF, rect: QRectF) -> bool:
+    """Return True if segment a→b intersects or is inside rect."""
+    if rect.contains(a) or rect.contains(b):
+        return True
+    LEFT, RIGHT, BOTTOM, TOP = 1, 2, 4, 8
+
+    def code(p):
+        c = 0
+        if p.x() < rect.left():    c |= LEFT
+        elif p.x() > rect.right(): c |= RIGHT
+        if p.y() < rect.top():     c |= TOP
+        elif p.y() > rect.bottom(): c |= BOTTOM
+        return c
+
+    c1, c2 = code(a), code(b)
+    if c1 & c2:
+        return False
+    if c1 == 0 or c2 == 0:
+        return True
+
+    def cross_z(o, u, v):
+        return (u.x()-o.x())*(v.y()-o.y()) - (u.y()-o.y())*(v.x()-o.x())
+
+    corners = [
+        (QPointF(rect.left(),  rect.top()),    QPointF(rect.right(), rect.top())),
+        (QPointF(rect.right(), rect.top()),    QPointF(rect.right(), rect.bottom())),
+        (QPointF(rect.right(), rect.bottom()), QPointF(rect.left(),  rect.bottom())),
+        (QPointF(rect.left(),  rect.bottom()), QPointF(rect.left(),  rect.top())),
+    ]
+    for e0, e1 in corners:
+        if (cross_z(e0, e1, a) * cross_z(e0, e1, b) < 0 and
+                cross_z(a, b, e0) * cross_z(a, b, e1) < 0):
+            return True
+    return False
+
+
 def _mark_path(grid: RouterGrid, p_start: QPointF,
                waypoints: list[QPointF], p_end: QPointF):
     """Mark every grid cell along the full routed path as congested."""
@@ -339,10 +375,11 @@ class ComponentItem(QGraphicsItem):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             for pin in self.pins:
                 for conn in pin.connections:
-                    conn.update_path()          # stretch to new pin pos
+                    conn.update_path()
             scene = self.scene()
             if scene is not None:
-                scene._needs_reroute = True     # flag for post-drag reroute
+                scene._dirty_components.add(self)
+                scene._needs_reroute = True
 
         return super().itemChange(change, value)
 
@@ -496,6 +533,7 @@ class CADScene(QGraphicsScene):
         self.components:  list[ComponentItem] = []
         self.connections: list[ConnectionItem] = []
         self._needs_reroute = False
+        self._dirty_components: set = set()
         self._populate()
         self.route_all()
 
@@ -542,26 +580,59 @@ class CADScene(QGraphicsScene):
 
     # ── A* routing ────────────────────────────────────────────────────────────
 
-    def route_all(self) -> tuple[int, int]:
-        """
-        Build a fresh routing grid (with congestion) and A*-route all connections.
-        Shorter connections are routed first so they get cleaner paths.
-        """
-        grid = RouterGrid(self.components)
+    def route_all(self, partial: bool = False) -> tuple[int, int]:
+        dirty = self._dirty_components if partial else set()
         self._needs_reroute = False
+        self._dirty_components = set()
 
-        # Sort by Manhattan distance — shorter nets get priority
-        def net_length(conn: ConnectionItem) -> float:
+        grid = RouterGrid(self.components)
+
+        def net_length(conn):
             p1, p2 = conn.pin1.scene_pos(), conn.pin2.scene_pos()
             return abs(p1.x() - p2.x()) + abs(p1.y() - p2.y())
 
-        sorted_conns = sorted(self.connections, key=net_length)
+        affected = set()
+        if partial and dirty:
+            # 1. Connections directly attached to a moved component
+            for comp in dirty:
+                for pin in comp.pins:
+                    for conn in pin.connections:
+                        affected.add(conn)
 
+            # 2. Connections whose path segments cross the moved component's bbox
+            pad = (COMP_PAD_CELLS + 1) * CELL_SIZE
+            dirty_rects = [
+                QRectF(c.pos().x() - pad, c.pos().y() - pad,
+                       c.w + 2 * pad, c.h + 2 * pad)
+                for c in dirty
+            ]
+            for conn in self.connections:
+                if conn in affected or not conn._waypoints:
+                    continue
+                all_pts = ([conn.pin1.scene_pos()] +
+                           list(conn._waypoints) +
+                           [conn.pin2.scene_pos()])
+                for i in range(len(all_pts) - 1):
+                    if any(_seg_crosses_rect(all_pts[i], all_pts[i+1], r)
+                           for r in dirty_rects):
+                        affected.add(conn)
+                        break
+
+        # Replay stable cached paths onto the grid for congestion accuracy
+        stable = [c for c in self.connections if c not in affected]
+        for conn in stable:
+            if conn._waypoints:
+                _mark_path(grid, conn.pin1.scene_pos(), conn._waypoints,
+                           conn.pin2.scene_pos())
+
+        to_route = sorted(
+            affected if (partial and dirty) else self.connections,
+            key=net_length
+        )
         routed = fallback = 0
-        for conn in sorted_conns:
-            e1 = pin_exit_point(conn.pin1)
-            e2 = pin_exit_point(conn.pin2)
-            path = astar_route(grid, e1, e2)
+        for conn in to_route:
+            path = astar_route(grid, pin_exit_point(conn.pin1),
+                               pin_exit_point(conn.pin2))
             if path:
                 simplified = simplify_path(path)
                 conn.set_routed_path(simplified)
@@ -658,7 +729,7 @@ class CADView(QGraphicsView):
             if event.button() == Qt.MouseButton.LeftButton:
                 s = self.scene()
                 if getattr(s, '_needs_reroute', False):
-                    s.route_all()
+                    s.route_all(partial=True)
 
 
 # ── Main Window ───────────────────────────────────────────────────────────────

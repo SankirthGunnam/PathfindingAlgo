@@ -4,7 +4,7 @@ import ctypes
 import os
 import time
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsRectItem, QGraphicsPathItem,
@@ -682,6 +682,125 @@ class ConnectionItem(QGraphicsPathItem):
             painter.drawText(mid + QPointF(3, -3), self.label)
 
 
+# ── Auto Layout ───────────────────────────────────────────────────────────────
+
+def compute_auto_layout(data: dict) -> dict:
+    """
+    Assign pixel positions to components using pin-side connectivity.
+    Returns {comp_id: (x, y)}.
+
+    Column rank: right→left edges mean left-to-right flow (col[from] < col[to]).
+                 left→right edges mean right-to-left flow (col[to] < col[from]).
+    Connections with "layout": false are ignored for placement.
+    """
+    pin_sides: dict[tuple, str] = {}
+    comp_dims:  dict[int, tuple] = {}
+
+    for c in data["components"]:
+        cid = c["id"]
+        if c["type"] == "rfic":
+            for side, name in _RFIC_PINS:
+                pin_sides[(cid, name)] = side
+            comp_dims[cid] = (160, 300)
+        elif c["type"] == "antenna":
+            pin_sides[(cid, "FEED")] = "left"
+            comp_dims[cid] = (80, 140)
+        else:
+            for side, name in c["pins"]:
+                pin_sides[(cid, name)] = side
+            comp_dims[cid] = (c["w"], c["h"])
+
+    all_ids = [c["id"] for c in data["components"]]
+
+    # adj[A] = {B} means col[A] < col[B]
+    adj: dict[int, set] = {cid: set() for cid in all_ids}
+    for conn in data["connections"]:
+        if conn.get("layout") is False:
+            continue
+        fid, fpin = conn["from"]
+        tid, tpin = conn["to"]
+        fs = pin_sides.get((fid, fpin))
+        ts = pin_sides.get((tid, tpin))
+        if fs == "right" and ts == "left":
+            adj[fid].add(tid)
+        elif fs == "left" and ts == "right":
+            adj[tid].add(fid)
+
+    # Longest-path column ranks via Kahn's algorithm
+    in_deg: dict[int, int] = {cid: 0 for cid in all_ids}
+    for a, bs in adj.items():
+        for b in bs:
+            in_deg[b] += 1
+
+    col_rank: dict[int, int] = {cid: 0 for cid in all_ids}
+    queue = deque(cid for cid in all_ids if in_deg[cid] == 0)
+    while queue:
+        cid = queue.popleft()
+        for nid in adj[cid]:
+            col_rank[nid] = max(col_rank[nid], col_rank[cid] + 1)
+            in_deg[nid] -= 1
+            if in_deg[nid] == 0:
+                queue.append(nid)
+
+    # Group by column
+    col_groups: dict[int, list] = defaultdict(list)
+    for cid in all_ids:
+        col_groups[col_rank[cid]].append(cid)
+
+    # Initial row index within each column
+    row_pos: dict[int, int] = {}
+    for cids in col_groups.values():
+        for i, cid in enumerate(cids):
+            row_pos[cid] = i
+
+    # Neighbor lookup for barycenter (layout connections only)
+    nbrs: dict[int, list] = defaultdict(list)
+    for conn in data["connections"]:
+        if conn.get("layout") is False:
+            continue
+        fid, _ = conn["from"]
+        tid, _ = conn["to"]
+        nbrs[fid].append(tid)
+        nbrs[tid].append(fid)
+
+    # Barycenter row ordering
+    for _ in range(5):
+        for col in sorted(col_groups):
+            cids = col_groups[col]
+            scores = {}
+            for cid in cids:
+                cross = [n for n in nbrs[cid] if col_rank[n] != col]
+                scores[cid] = (sum(row_pos[n] for n in cross) / len(cross)
+                               if cross else row_pos[cid])
+            ordered = sorted(cids, key=lambda c: scores[c])
+            col_groups[col] = ordered
+            for i, cid in enumerate(ordered):
+                row_pos[cid] = i
+
+    # Convert to pixel positions
+    COL_GAP = 60
+    ROW_GAP = 40
+
+    col_w = {col: max(comp_dims[cid][0] for cid in cids)
+             for col, cids in col_groups.items()}
+    col_x: dict[int, int] = {}
+    x = 0
+    for col in sorted(col_groups):
+        col_x[col] = x
+        x += col_w[col] + COL_GAP
+
+    positions: dict[int, tuple] = {}
+    for col, cids in col_groups.items():
+        y = 0
+        for cid in cids:
+            sx = round(col_x[col] / SNAP_GRID) * SNAP_GRID
+            sy = round(y / SNAP_GRID) * SNAP_GRID
+            positions[cid] = (sx, sy)
+            y += comp_dims[cid][1] + ROW_GAP
+
+    return positions
+
+
 # ── Scene ─────────────────────────────────────────────────────────────────────
 
 class CADScene(QGraphicsScene):
@@ -691,14 +810,14 @@ class CADScene(QGraphicsScene):
 
     def __init__(self):
         super().__init__()
-        data = self._load_schema()
-        r = data["scene"]["rect"]
+        self._data = self._load_schema()
+        r = self._data["scene"]["rect"]
         self.setSceneRect(r[0], r[1], r[2], r[3])
         self.components:  list = []
         self.connections: list[ConnectionItem] = []
         self._needs_reroute = False
         self._dirty_components: set = set()
-        self._populate(data)
+        self._populate(self._data)
         self.route_all()
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -725,8 +844,11 @@ class CADScene(QGraphicsScene):
 
     # ── Populate from JSON ────────────────────────────────────────────────────
 
-    def _populate(self, data: dict):
+    def _populate(self, data: dict, positions: dict | None = None):
         comp_map: dict[int, object] = {}
+
+        if positions is None:
+            positions = compute_auto_layout(data)
 
         for c in data["components"]:
             cid  = c["id"]
@@ -745,7 +867,8 @@ class CADScene(QGraphicsScene):
                     pin_spec=[tuple(p) for p in c["pins"]],
                 )
 
-            item.setPos(c["x"], c["y"])
+            x, y = positions.get(cid, (c.get("x", 0), c.get("y", 0)))
+            item.setPos(x, y)
             self._add_comp(item)
             comp_map[cid] = item
 
@@ -758,6 +881,18 @@ class CADScene(QGraphicsScene):
                 comp_map[to_id].get_pin(to_pin),
                 label,
             )
+
+    def auto_layout(self):
+        positions = compute_auto_layout(self._data)
+        self._needs_reroute = False
+        self._dirty_components = set()
+        for comp in self.components:
+            cid = comp.comp_id
+            if cid in positions:
+                x, y = positions[cid]
+                comp.setPos(x, y)
+        routed, fallback, ms = self.route_all()
+        return routed, fallback, ms
 
     # ── A* routing ────────────────────────────────────────────────────────────
 
@@ -1002,6 +1137,7 @@ class MainWindow(QMainWindow):
         tb.addAction("Zoom 1:1",     self.zoom_reset)
         tb.addSeparator()
         tb.addAction("Re-route All", self.reroute)
+        tb.addAction("Auto Layout",  self.auto_layout)
         tb.addAction("Reload",       self.reload)
         tb.addSeparator()
         tb.addWidget(QLabel(
@@ -1029,6 +1165,11 @@ class MainWindow(QMainWindow):
     def reroute(self):
         routed, fallback, ms = self.cad_scene.route_all()
         self._refresh_status(routed, fallback, ms)
+
+    def auto_layout(self):
+        routed, fallback, ms = self.cad_scene.auto_layout()
+        self._refresh_status(routed, fallback, ms)
+        self.fit_all()
 
     def reload(self):
         self.cad_scene = CADScene()

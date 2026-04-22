@@ -98,11 +98,11 @@
       "w": 120, "h": 130,
       "x": 1500, "y": 260,
       "pins": [
-        ["left",  "ANT"],
-        ["right", "TX1"],
-        ["right", "TX2"],
-        ["right", "RX1"],
-        ["right", "RX2"]
+        ["right", "ANT"],
+        ["left",  "TX1"],
+        ["left",  "TX2"],
+        ["left",  "RX1"],
+        ["left",  "RX2"]
       ]
     },
     {
@@ -216,7 +216,7 @@
     { "from": [3, "RF_OUT_MB"],  "to": [7, "TX2"],          "label": "PA_OUT_MB"  },
     { "from": [1, "TX_LB"],      "to": [11, "IN"],          "label": "TX_LB"      },
     { "from": [11, "OUT_P"],     "to": [4, "RF_IN"],        "label": "BAL_OUT"    },
-    { "from": [4, "RF_OUT"],     "to": [6, "TX_IN"],        "label": "TX_LB_PA"   },
+    { "from": [4, "RF_OUT"],     "to": [6, "TX_IN"],        "label": "TX_LB_PA",  "layout": false },
     { "from": [7, "RX1"],        "to": [2, "RF_IN"],        "label": "RX_HB"      },
     { "from": [2, "RF_OUT"],     "to": [9, "RF_IN"],        "label": "LNA_OUT"    },
     { "from": [9, "RF_OUT"],     "to": [1, "RX1_HB"],       "label": "SAW_HB_OUT" },

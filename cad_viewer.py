@@ -4,11 +4,13 @@ import ctypes
 import os
 import time
 import json
+import argparse
 from collections import defaultdict, deque
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsRectItem, QGraphicsPathItem,
-    QToolBar, QStatusBar, QLabel
+    QToolBar, QStatusBar, QLabel, QDockWidget, QWidget,
+    QVBoxLayout, QCheckBox, QPushButton, QScrollArea, QFrame,
 )
 from PySide6.QtCore import Qt, QRectF, QPointF
 from PySide6.QtGui import (
@@ -19,6 +21,8 @@ from PySide6.QtGui import (
 
 WIRE_COLOR   = QColor(0, 0, 0)
 WIRE_SEL_COLOR = QColor(200, 0, 0)
+WIRE_DIM_COLOR = QColor(210, 210, 210)
+COMP_DIM_OPACITY = 0.22
 GRID_MINOR   = 20
 GRID_MAJOR   = 100
 SNAP_GRID    = GRID_MINOR
@@ -340,6 +344,7 @@ class ComponentItem(QGraphicsItem):
         self.comp_id   = comp_id
         self.comp_type = comp_type
         self.color     = color
+        self.block     = "signal"
         self.w = 120
         self.h = 100
         self.pins = []
@@ -380,6 +385,9 @@ class ComponentItem(QGraphicsItem):
 
     def paint(self, painter, option, widget=None):
         self._draw_body(painter)
+
+    def set_filter_highlight(self, active: bool):
+        self.setOpacity(1.0 if active else COMP_DIM_OPACITY)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
@@ -584,6 +592,9 @@ class AntennaItem(QGraphicsItem):
         painter.drawText(QRectF(cx * 0.3, cy - h * 0.45, w * 0.6, 14),
                          Qt.AlignmentFlag.AlignCenter, "ANT")
 
+    def set_filter_highlight(self, active: bool):
+        self.setOpacity(1.0 if active else COMP_DIM_OPACITY)
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
             x = round(value.x() / SNAP_GRID) * SNAP_GRID
@@ -603,15 +614,32 @@ class AntennaItem(QGraphicsItem):
 # ── Connection ────────────────────────────────────────────────────────────────
 
 class ConnectionItem(QGraphicsPathItem):
-    def __init__(self, pin1: PinItem, pin2: PinItem, label: str = ""):
+    def __init__(self, pin1: PinItem, pin2: PinItem, label: str = "",
+                 block: str = "signal", block_colors: dict | None = None):
         super().__init__()
         self.pin1  = pin1
         self.pin2  = pin2
         self.label = label
+        self.block = block
+        self._block_colors = block_colors or {}
+        self._filter_visible = True
         self._waypoints = None
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setZValue(0)
         self._draw_bezier()
+
+    def set_filter_visible(self, visible: bool):
+        self._filter_visible = visible
+        self.setVisible(visible)
+        self.update()
+
+    def wire_color(self) -> QColor:
+        if not self._filter_visible:
+            return WIRE_DIM_COLOR
+        rgb = self._block_colors.get(self.block)
+        if rgb:
+            return QColor(*rgb)
+        return WIRE_COLOR
 
     def set_routed_path(self, waypoints):
         self._waypoints = waypoints
@@ -662,18 +690,20 @@ class ConnectionItem(QGraphicsPathItem):
         self.setPath(path)
 
     def paint(self, painter, option, widget=None):
+        if not self._filter_visible:
+            return
         if self.isSelected():
             pen = QPen(WIRE_SEL_COLOR, 2.0)
             pen.setStyle(Qt.PenStyle.DashDotLine)
             pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         else:
-            pen = QPen(WIRE_COLOR, 1.5)
+            col = self.wire_color()
+            pen = QPen(col, 2.0 if self._block_colors else 1.5)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         painter.setPen(pen)
         painter.drawPath(self.path())
 
-        # Net label near midpoint
         if self.label:
             pts = self.path()
             mid = pts.pointAtPercent(0.5)
@@ -705,6 +735,10 @@ def compute_auto_layout(data: dict) -> dict:
         elif c["type"] == "antenna":
             pin_sides[(cid, "FEED")] = "left"
             comp_dims[cid] = (80, 140)
+        elif c["type"] in ("rf_component", "circuit_component"):
+            for side, name in c["pins"]:
+                pin_sides[(cid, name)] = side
+            comp_dims[cid] = (c["w"], c["h"])
         else:
             for side, name in c["pins"]:
                 pin_sides[(cid, name)] = side
@@ -805,16 +839,22 @@ def compute_auto_layout(data: dict) -> dict:
 
 class CADScene(QGraphicsScene):
 
-    SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "schematic.json")
+    DEFAULT_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "schematic.json")
 
-    def __init__(self):
+    def __init__(self, schema_path: str | None = None):
         super().__init__()
+        self._schema_path = schema_path or self.DEFAULT_SCHEMA
         self._data = self._load_schema()
         r = self._data["scene"]["rect"]
         self.setSceneRect(r[0], r[1], r[2], r[3])
         self.components:  list = []
         self.connections: list[ConnectionItem] = []
+        self._block_defs: list[dict] = self._data.get("blocks", [])
+        self._block_colors: dict[str, tuple] = {
+            b["id"]: tuple(b["color"]) for b in self._block_defs
+        }
+        self._active_blocks: set[str] | None = None  # None = show all
         self._needs_reroute = False
         self._dirty_components: set = set()
         self._populate(self._data)
@@ -827,10 +867,11 @@ class CADScene(QGraphicsScene):
         self.components.append(comp)
         return comp
 
-    def _connect(self, pin1: PinItem, pin2: PinItem, label: str = ""):
+    def _connect(self, pin1: PinItem, pin2: PinItem, label: str = "",
+                 block: str = "signal"):
         if pin1 is None or pin2 is None:
             return
-        conn = ConnectionItem(pin1, pin2, label)
+        conn = ConnectionItem(pin1, pin2, label, block, self._block_colors)
         self.addItem(conn)
         pin1.connections.append(conn)
         pin2.connections.append(conn)
@@ -839,8 +880,33 @@ class CADScene(QGraphicsScene):
     # ── JSON schema loader ────────────────────────────────────────────────────
 
     def _load_schema(self) -> dict:
-        with open(self.SCHEMA_FILE, "r", encoding="utf-8") as f:
+        with open(self._schema_path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    def block_ids(self) -> list[str]:
+        return [b["id"] for b in self._block_defs]
+
+    def block_labels(self) -> dict[str, str]:
+        return {b["id"]: b.get("label", b["id"]) for b in self._block_defs}
+
+    def apply_block_filter(self, active: set[str] | None):
+        """Show only connections (and related components) for selected blocks."""
+        self._active_blocks = active
+        comp_active: dict[int, bool] = defaultdict(bool)
+
+        for conn in self.connections:
+            show = active is None or conn.block in active
+            conn.set_filter_visible(show)
+            if show:
+                comp_active[conn.pin1.parent_component.comp_id] = True
+                comp_active[conn.pin2.parent_component.comp_id] = True
+
+        for comp in self.components:
+            cid = comp.comp_id
+            if active is None:
+                comp.set_filter_highlight(True)
+            else:
+                comp.set_filter_highlight(comp_active.get(cid, False))
 
     # ── Populate from JSON ────────────────────────────────────────────────────
 
@@ -858,14 +924,24 @@ class CADScene(QGraphicsScene):
                 item = RFICItem(cid)
             elif kind == "antenna":
                 item = AntennaItem(cid)
-            else:
+            elif kind in ("rf_component", "circuit_component"):
                 item = RFComponentItem(
                     cid,
-                    c["label"],
+                    c.get("label", c.get("ref", f"U{cid}")),
                     QColor(*c["color"]),
                     w=c["w"], h=c["h"],
                     pin_spec=[tuple(p) for p in c["pins"]],
                 )
+                item.block = c.get("block", "signal")
+            else:
+                item = RFComponentItem(
+                    cid,
+                    c.get("label", f"U{cid}"),
+                    QColor(*c.get("color", [149, 165, 166])),
+                    w=c.get("w", 120), h=c.get("h", 100),
+                    pin_spec=[tuple(p) for p in c.get("pins", [])],
+                )
+                item.block = c.get("block", "signal")
 
             x, y = positions.get(cid, (c.get("x", 0), c.get("y", 0)))
             item.setPos(x, y)
@@ -879,8 +955,12 @@ class CADScene(QGraphicsScene):
             self._connect(
                 comp_map[from_id].get_pin(from_pin),
                 comp_map[to_id].get_pin(to_pin),
-                label,
+                conn.get("label", conn.get("net", "")),
+                conn.get("block", "signal"),
             )
+
+        if self._active_blocks is not None:
+            self.apply_block_filter(self._active_blocks)
 
     def auto_layout(self):
         positions = compute_auto_layout(self._data)
@@ -1116,14 +1196,19 @@ class CADView(QGraphicsView):
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, schema_path: str | None = None):
         super().__init__()
-        self.setWindowTitle("RF Frontend Schematic — Samsung S23 Style")
+        self._schema_path = schema_path
+        self.cad_scene = CADScene(schema_path)
+        title = self.cad_scene._data.get("title", "Schematic Viewer")
+        self.setWindowTitle(title)
         self.resize(1400, 900)
-        self.cad_scene = CADScene()
-        self.cad_view  = CADView(self.cad_scene)
+        self.cad_view = CADView(self.cad_scene)
         self.setCentralWidget(self.cad_view)
+        self._block_checks: dict[str, QCheckBox] = {}
+        self._filter_dock: QDockWidget | None = None
         self._build_toolbar()
+        self._build_filter_dock()
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._refresh_status()
@@ -1141,19 +1226,107 @@ class MainWindow(QMainWindow):
         tb.addAction("Reload",       self.reload)
         tb.addSeparator()
         tb.addWidget(QLabel(
-            "  Scroll=Zoom  |  Middle-drag=Pan  |  Click=Select wire/comp  "
-            "|  Drag=Move (snaps grid, auto-reroutes)"))
+            "  Scroll=Zoom  |  Middle-drag=Pan  |  Filter blocks in panel →  "
+            "|  Drag=Move (auto-reroutes)"))
+
+    def _build_filter_dock(self):
+        dock = QDockWidget("Functional Blocks", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
+                             | Qt.DockWidgetArea.RightDockWidgetArea)
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        hint = QLabel("Check blocks to show only those connections.\n"
+                      "Uncheck all → show everything.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_row = QWidget()
+        btn_layout = QVBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        all_btn = QPushButton("Show All")
+        none_btn = QPushButton("Clear Filter")
+        all_btn.clicked.connect(self._filter_show_all)
+        none_btn.clicked.connect(self._filter_clear)
+        btn_layout.addWidget(all_btn)
+        btn_layout.addWidget(none_btn)
+        layout.addWidget(btn_row)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(line)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+
+        labels = self.cad_scene.block_labels()
+        for bid in self.cad_scene.block_ids():
+            cb = QCheckBox(labels.get(bid, bid))
+            rgb = self.cad_scene._block_colors.get(bid, (149, 165, 166))
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: rgb({rgb[0]},{rgb[1]},{rgb[2]}); "
+                f"font-weight: 600; }}"
+            )
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._on_block_filter_changed)
+            self._block_checks[bid] = cb
+            inner_layout.addWidget(cb)
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+
+        dock.setWidget(panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._filter_dock = dock
+
+    def _selected_blocks(self) -> set[str] | None:
+        if not self._block_checks:
+            return None
+        active = {bid for bid, cb in self._block_checks.items() if cb.isChecked()}
+        if not active:
+            return None
+        if len(active) == len(self._block_checks):
+            return None
+        return active
+
+    def _on_block_filter_changed(self, _state=0):
+        self.cad_scene.apply_block_filter(self._selected_blocks())
+        self._refresh_status()
+
+    def _filter_show_all(self):
+        for cb in self._block_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+        self.cad_scene.apply_block_filter(None)
+        self._refresh_status()
+
+    def _filter_clear(self):
+        for cb in self._block_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+        self.cad_scene.apply_block_filter(set())
+        self._refresh_status()
 
     def _refresh_status(self, routed=None, fallback=None, elapsed_ms=None):
         n_comp = len(self.cad_scene.components)
         n_conn = len(self.cad_scene.connections)
+        visible = sum(1 for c in self.cad_scene.connections if c._filter_visible)
         backend = "C++ DLL" if _dll_available else "Python"
+        filt = self._selected_blocks()
+        filt_txt = "all blocks" if filt is None else f"{len(filt)} block(s)"
         extra = ""
         if routed is not None:
             extra = (f"   |   Routed: {routed}   Fallback: {fallback}"
                      f"   |   {backend}  {elapsed_ms:.1f} ms")
         self._status.showMessage(
-            f"Components: {n_comp}   Connections: {n_conn}{extra}")
+            f"Components: {n_comp}   Wires: {visible}/{n_conn} visible"
+            f"   Filter: {filt_txt}{extra}")
 
     def fit_all(self):
         self.cad_view.fitInView(self.cad_scene.itemsBoundingRect(),
@@ -1172,8 +1345,19 @@ class MainWindow(QMainWindow):
         self.fit_all()
 
     def reload(self):
-        self.cad_scene = CADScene()
+        active = self._selected_blocks()
+        if self._filter_dock is not None:
+            self.removeDockWidget(self._filter_dock)
+            self._filter_dock.deleteLater()
+            self._filter_dock = None
+        self.cad_scene = CADScene(self._schema_path)
         self.cad_view.setScene(self.cad_scene)
+        self._block_checks.clear()
+        self._build_filter_dock()
+        if active is not None and len(active) < len(self.cad_scene.block_ids()):
+            for bid, cb in self._block_checks.items():
+                cb.setChecked(bid in active)
+            self.cad_scene.apply_block_filter(active)
         self._refresh_status()
         self.fit_all()
 
@@ -1181,8 +1365,21 @@ class MainWindow(QMainWindow):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Interactive schematic viewer")
+    parser.add_argument(
+        "schema",
+        nargs="?",
+        default=None,
+        help="Path to schematic.json (default: ./schematic.json)",
+    )
+    args = parser.parse_args()
+    schema_path = args.schema
+    if schema_path is None:
+        schema_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "schematic.json")
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = MainWindow()
+    window = MainWindow(schema_path)
     window.show()
     sys.exit(app.exec())
